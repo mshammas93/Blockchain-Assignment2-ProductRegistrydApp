@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Product Registry dApp</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- ethers.js library (v6) -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+
+  <header>
+    <img src="logo.svg" alt="Product Registry logo">
+    <h1>Product Registry dApp</h1>
+    <p>MG3012 Blockchain Technology for Business: Assignment 2</p>
+  </header>
+
+  <main>
+
+    <!-- About section: paragraphs, list, links -->
+    <section class="card">
+      <h2>About this dApp</h2>
+      <p>
+        This app lets small businesses list products on the Ethereum <strong>Sepolia</strong> testnet.
+        Every product is stored in a smart contract, so the records are public and can't be changed
+        by anyone except the seller who listed them.
+      </p>
+      <h3>How to use it</h3>
+      <ol>
+        <li>Click <strong>Connect MetaMask</strong> and approve the connection.</li>
+        <li>Add a product with a name and a price (PKR). MetaMask will ask you to confirm the transaction.</li>
+        <li>Wait for the transaction to be confirmed, then see it in the product list below.</li>
+        <li>You can update the price of any product that <em>you</em> listed.</li>
+      </ol>
+      <p>
+        Useful links:
+        <a id="etherscanLink" href="https://sepolia.etherscan.io/" target="_blank">View contract on Etherscan</a> ·
+        <a href="https://docs.metamask.io/" target="_blank">MetaMask docs</a> ·
+        <a href="https://docs.ethers.org/v6/" target="_blank">ethers.js docs</a>
+      </p>
+    </section>
+
+    <!-- Wallet connection -->
+    <section class="card">
+      <h2>1. Wallet</h2>
+      <button id="connectBtn">Connect MetaMask</button>
+      <p>Account: <code id="account">not connected</code></p>
+      <p>Network: <code id="network">-</code></p>
+    </section>
+
+    <!-- Write function: addProduct -->
+    <section class="card">
+      <h2>2. Add a product (write)</h2>
+      <div class="row">
+        <input id="productName" type="text" placeholder="Product name, e.g. Laptop Bag">
+        <input id="productPrice" type="number" min="1" placeholder="Price in PKR, e.g. 2500">
+        <button id="addBtn" disabled>Add Product</button>
+      </div>
+    </section>
+
+    <!-- Write function: updatePrice -->
+    <section class="card">
+      <h2>3. Update a price (write)</h2>
+      <div class="row">
+        <input id="updateId" type="number" min="0" placeholder="Product ID, e.g. 0">
+        <input id="updatePriceInput" type="number" min="1" placeholder="New price in PKR">
+        <button id="updateBtn" disabled>Update Price</button>
+      </div>
+      <p class="muted">Only the wallet that added a product can change its price.</p>
+    </section>
+
+    <!-- Read functions: getProductCount + getProduct -->
+    <section class="card">
+      <h2>4. Products on the blockchain (read)</h2>
+      <button id="refreshBtn" disabled>Refresh List</button>
+      <p>Total products: <strong id="productCount">-</strong></p>
+      <ul id="productList">
+        <li class="muted">Connect your wallet to load products.</li>
+      </ul>
+    </section>
+
+    <!-- Transaction results -->
+    <section class="card">
+      <h2>Transaction status</h2>
+      <div id="status" class="status">Waiting for you to connect MetaMask...</div>
+    </section>
+
+  </main>
+
+  <footer>
+    <p>Built with Solidity, Remix IDE, MetaMask and ethers.js</p>
+  </footer>
+
+  <script>
+    // =====================================================
+    // 1) PASTE YOUR DEPLOYED CONTRACT ADDRESS HERE
+    // =====================================================
+    const CONTRACT_ADDRESS = "0xEE76998D256180De6744bb8F5f0b3285044f7046";
+
+    // ABI = the list of functions in SmartContract.sol (human-readable form)
+    const CONTRACT_ABI = [
+      "function owner() view returns (address)",
+      "function addProduct(string _name, uint256 _price)",
+      "function updatePrice(uint256 _id, uint256 _newPrice)",
+      "function getProduct(uint256 _id) view returns (string name, uint256 price, address seller)",
+      "function getProductCount() view returns (uint256)",
+      "event ProductAdded(uint256 indexed id, string name, uint256 price, address indexed seller)",
+      "event PriceUpdated(uint256 indexed id, uint256 oldPrice, uint256 newPrice)"
+    ];
+
+    const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111 in hex
+
+    let provider, signer, contract;
+
+    const $ = (id) => document.getElementById(id);
+
+    function showStatus(message, type = "") {
+      const box = $("status");
+      box.className = "status " + type;
+      box.innerHTML = message;
+    }
+
+    function shortAddr(a) {
+      return a.slice(0, 6) + "..." + a.slice(-4);
+    }
+
+    function txLink(hash) {
+      return `<a href="https://sepolia.etherscan.io/tx/${hash}" target="_blank">${hash}</a>`;
+    }
+
+    // Get a readable error message out of MetaMask / ethers errors
+    function readableError(err) {
+      if (err.code === "ACTION_REJECTED" || err.code === 4001) return "You rejected the transaction in MetaMask.";
+      return err.reason || err.shortMessage || err.message || String(err);
+    }
+
+    // ---------- Connect MetaMask ----------
+    async function connectWallet() {
+      if (typeof window.ethereum === "undefined") {
+        showStatus("MetaMask not found. Install MetaMask and open this page through a local server (e.g. VS Code Live Server).", "error");
+        return;
+      }
+      try {
+        // Make sure MetaMask is on Sepolia
+        const chainId = await window.ethereum.request({ method: "eth_chainId" });
+        if (chainId !== SEPOLIA_CHAIN_ID) {
+          showStatus("Switching MetaMask to the Sepolia network...");
+          await window.ethereum.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: SEPOLIA_CHAIN_ID }]
+          });
+        }
+
+        provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.send("eth_requestAccounts", []);
+        signer = await provider.getSigner();
+        contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+
+        const address = await signer.getAddress();
+        const network = await provider.getNetwork();
+        const balance = await provider.getBalance(address);
+
+        $("account").textContent = address;
+        $("network").textContent = `${network.name} (chain ID ${network.chainId}) · balance ${Number(ethers.formatEther(balance)).toFixed(4)} SepoliaETH`;
+        $("connectBtn").textContent = "Connected ✓ " + shortAddr(address);
+        ["addBtn", "updateBtn", "refreshBtn"].forEach(id => $(id).disabled = false);
+        $("etherscanLink").href = `https://sepolia.etherscan.io/address/${CONTRACT_ADDRESS}`;
+
+        showStatus(`Connected to MetaMask.\nAccount: ${address}\nContract: ${CONTRACT_ADDRESS}`, "ok");
+        await loadProducts();
+      } catch (err) {
+        showStatus("Connection failed: " + readableError(err), "error");
+      }
+    }
+
+    // ---------- READ: getProductCount + getProduct ----------
+    async function loadProducts() {
+      try {
+        const count = Number(await contract.getProductCount());
+        $("productCount").textContent = count;
+        const list = $("productList");
+        list.innerHTML = "";
+
+        if (count === 0) {
+          list.innerHTML = '<li class="muted">No products yet. Add the first one above.</li>';
+          return;
+        }
+        for (let i = 0; i < count; i++) {
+          const [name, price, seller] = await contract.getProduct(i);
+          const li = document.createElement("li");
+          li.innerHTML = `<strong>#${i}</strong> ${escapeHtml(name)}: <strong>PKR ${price.toString()}</strong>
+                          <span class="muted">(seller ${shortAddr(seller)})</span>`;
+          list.appendChild(li);
+        }
+      } catch (err) {
+        showStatus("Could not read products. Check that CONTRACT_ADDRESS is correct and you are on Sepolia.\n" + readableError(err), "error");
+      }
+    }
+
+    // ---------- WRITE: addProduct ----------
+    async function addProduct() {
+      const name = $("productName").value.trim();
+      const price = $("productPrice").value;
+      if (!name || !price || Number(price) <= 0) {
+        showStatus("Please enter a product name and a price greater than 0.", "error");
+        return;
+      }
+      try {
+        showStatus("Please confirm the transaction in MetaMask...");
+        const tx = await contract.addProduct(name, BigInt(price));
+        showStatus(`Transaction sent. Waiting for confirmation...\nTx hash: ${txLink(tx.hash)}`);
+        const receipt = await tx.wait();
+        showStatus(
+          `✅ Product added!\nTx hash: ${txLink(tx.hash)}\nBlock: ${receipt.blockNumber}\nGas used: ${receipt.gasUsed.toString()}`,
+          "ok"
+        );
+        $("productName").value = "";
+        $("productPrice").value = "";
+        await loadProducts();
+      } catch (err) {
+        showStatus("Add product failed: " + readableError(err), "error");
+      }
+    }
+
+    // ---------- WRITE: updatePrice ----------
+    async function updatePrice() {
+      const id = $("updateId").value;
+      const newPrice = $("updatePriceInput").value;
+      if (id === "" || !newPrice || Number(newPrice) <= 0) {
+        showStatus("Please enter a product ID and a new price greater than 0.", "error");
+        return;
+      }
+      try {
+        showStatus("Please confirm the transaction in MetaMask...");
+        const tx = await contract.updatePrice(BigInt(id), BigInt(newPrice));
+        showStatus(`Transaction sent. Waiting for confirmation...\nTx hash: ${txLink(tx.hash)}`);
+        const receipt = await tx.wait();
+        showStatus(
+          `✅ Price updated for product #${id}!\nTx hash: ${txLink(tx.hash)}\nBlock: ${receipt.blockNumber}\nGas used: ${receipt.gasUsed.toString()}`,
+          "ok"
+        );
+        await loadProducts();
+      } catch (err) {
+        showStatus("Update failed: " + readableError(err), "error");
+      }
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // ---------- Button events ----------
+    $("connectBtn").addEventListener("click", connectWallet);
+    $("addBtn").addEventListener("click", addProduct);
+    $("updateBtn").addEventListener("click", updatePrice);
+    $("refreshBtn").addEventListener("click", loadProducts);
+
+    // Reload the page if the user switches account or network in MetaMask
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", () => window.location.reload());
+      window.ethereum.on("chainChanged", () => window.location.reload());
+    }
+  </script>
+</body>
+</html>
